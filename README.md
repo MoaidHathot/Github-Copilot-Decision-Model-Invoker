@@ -12,7 +12,7 @@ A **single-file .NET 11 / C# 15 app** for decision models, usable as a CLI or an
 | `foundry` | Your GPT-6 Luna deployment name | `/openai/v1/decisions` | Entra ID / `az login`, or API key |
 | `openai` | `gpt-6-luna` | `/v1/decisions` | OpenAI API key |
 
-Copilot's decision routes are discoverable in its authenticated catalog but are **not a documented public Copilot Decisions SDK contract**. Foundry and OpenAI document their decision endpoints publicly. Actual Copilot availability and policy are checked using your login's `/models` response.
+The utility currently uses Copilot's internal HTTP decision routes and checks availability through your login's `/models` response. The published .NET Copilot SDK also exposes an **experimental sessionless Decisions API**, which was subsequently verified with both models. See [SDK-REVIEW.md](SDK-REVIEW.md) for the comparison, runtime limits, and a runnable .NET example. Foundry and OpenAI document their decision HTTP endpoints publicly.
 
 ## Quick start
 

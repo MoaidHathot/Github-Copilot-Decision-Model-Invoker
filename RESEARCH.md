@@ -1,6 +1,6 @@
 # Decision-model access research
 
-**Checked: 2026-11-17.** Public documentation was reviewed and live HTTP calls were made using the existing authenticated accounts on this Windows machine. This is a point-in-time account-specific verification.
+**Checked: 2026-11-17.** Public documentation was reviewed and live HTTP and .NET SDK calls were made using the existing authenticated accounts on this Windows machine. This is a point-in-time account-specific verification. The SDK findings below correct the initial review, following the supplied gist.
 
 ## Conclusions
 
@@ -9,6 +9,7 @@
 3. They require **different wire protocols**. One provider/authentication implementation can support both by selecting a protocol adapter from `supported_endpoints`.
 4. Existing **Copilot CLI and GitHub CLI browser logins both worked**. No PAT was created. HTTP still uses an OAuth bearer token internally; the utility retrieves it from the existing credential store/helper.
 5. Microsoft Foundry provides documented endpoints for both models, with Entra ID or key authentication. Foundry billing is separate from the Copilot subscription.
+6. **The published .NET Copilot SDK can call both models directly through its sessionless RPC API.** `GitHub.Copilot.SDK` 1.0.34 and runtime 1.0.112 (protocol 3) were live-tested with `UseLoggedInUser = true` and the `DECISIONS_API` feature flag. See [SDK-REVIEW.md](SDK-REVIEW.md) for limits and migration tradeoffs.
 
 ## Verified Copilot routes
 
@@ -88,6 +89,7 @@ The utility adds a fresh `X-Request-Id`. This header set was tested; the experim
 - The support-ticket choice was `billing` in both cases. This verifies integration, not general model accuracy or calibration.
 - Raw response fixtures are in `tests/fixtures/`. They contain sample answers and usage, not credentials.
 - The offline suite checks Foundry URLs, deployment-name handling, API-key headers, common result handling, and MCP protocol behavior.
+- A separate .NET SDK probe called `client.Rpc.Decisions.AskAsync(...)` with boolean, choice, and score questions for each model. The runtime reported authenticated `user` credentials; the probe supplied no token and did not read the credential store itself. Both calls succeeded, with the expected upstream model names and `billing` selection.
 
 No Azure deployment or direct OpenAI key was provided for live verification. Image input is mapped by the Decisions adapter but was not live-tested. Other accounts, plans, organizational policies, or regions can expose different availability.
 
@@ -103,15 +105,20 @@ The OS credential-store layout and direct inference interface are implementation
 
 ## Copilot SDK, normal Copilot, and MCP
 
-The current Copilot SDK documentation describes agent sessions and message submission, including generated structured outputs [2, 4]. It does not document a public method accepting the `systemone` or `decisions` request contracts reviewed here. Setting a session's `Model` field does not convert an agent/chat request into either contract.
+**Correction:** the initial review focused on the SDK README and missed the public experimental APIs in its generated RPC surface. The supplied gist [12] demonstrates a sessionless Node.js facade; the published .NET SDK exposes the same runtime operation through `client.Rpc.Decisions.AskAsync(...)` [13].
 
-Consequently:
+The .NET equivalents verified in package 1.0.34 are:
 
-- Use direct decision HTTP requests in this utility.
-- Expose the utility as MCP to let a Copilot/other agent invoke it as a tool.
-- Continue using the same logged-in Copilot account for the utility's authentication.
+- `client.Rpc.Models.ListAsync()` and its `DecisionModels` property for discovery.
+- `client.Rpc.Decisions.AskAsync(...)` for both model families.
+- `DecisionContextText` / `DecisionContextJson` and typed boolean, choice, score, and refusal results.
+- `UseLoggedInUser = true` for runtime-managed authentication.
 
-This is technically verified access to Copilot's authenticated inference service, **not an assertion that GitHub has published a supported public Decisions API for arbitrary applications**. The official general Copilot model list [5] covers the regular product surfaces; the authenticated catalog is the source used here for decision routes.
+These calls need no chat session. The runtime must have `COPILOT_CLI_ENABLED_FEATURE_FLAGS=DECISIONS_API`, and the experimental C# API requires an explicit `GHCP001` diagnostic opt-in. The verified SDK/runtime pair is 1.0.34 / 1.0.112, using protocol 3; the NuGet package pins that runtime version in its build props [14]. The gist reports a protocol mismatch with a newer protocol-4 CLI, so compatible version selection matters.
+
+For a long-running MCP server, an SDK-backed provider would be preferable for maintained authentication, account discovery, and shared protocol handling. Its runtime limits and normalization differ from the current direct-HTTP implementation; [SDK-REVIEW.md](SDK-REVIEW.md) records the verified differences. The SDK's default on this account was Luna, so the utility's Microsoft default must be passed explicitly.
+
+Copilot's raw HTTP endpoints remain internal, and the typed SDK Decisions surface is explicitly experimental. The official general Copilot model list [5] covers the regular product surfaces; use decision-specific discovery for this workload.
 
 A public community implementation independently reported successful Microsoft-Decision-1 requests through Copilot Enterprise on November 2, using `/v1/systemone`; its merged implementation specifically retains hidden classifier models [3]. The Luna Copilot route in this utility is supported by this session's live discovery and inference, rather than inferred from the ordinary chat-model listing.
 
@@ -153,7 +160,7 @@ IDecisionProtocol
     +-- DecisionsProtocol ---------- input, named array, predicate, choices/levels
 ```
 
-**One Copilot provider is sufficient for both models; two protocol adapters are necessary.** Foundry reuses the same adapters while supplying its own paths, credentials, and deployment names. Arbitrary Foundry deployment names make an explicit protocol setting preferable to guessing from the name.
+**One Copilot provider is sufficient for both models.** The current HTTP implementation needs two protocol adapters; an SDK-backed implementation can delegate that translation to the Copilot runtime. Foundry reuses the HTTP adapters while supplying its own paths, credentials, and deployment names. Arbitrary Foundry deployment names make an explicit protocol setting preferable to guessing from the name.
 
 ## Sources
 
@@ -168,3 +175,6 @@ IDecisionProtocol
 9. [GitHub: GitHub Models retirement](https://docs.github.com/en/billing/concepts/product-billing/github-models).
 10. [Microsoft Learn: File-based apps](https://learn.microsoft.com/en-us/dotnet/core/sdk/file-based-apps) and [C# 15](https://learn.microsoft.com/en-us/dotnet/csharp/whats-new/csharp-15) — .NET 11 file-based apps, `#:include`, closed hierarchies, and collection-expression arguments.
 11. [Official MCP C# SDK](https://github.com/modelcontextprotocol/csharp-sdk) — stdio hosting and structured tools.
+12. [Supplied gist: Copilot decision models through HTTP or SDK](https://gist.github.com/Arithmomaniac/dbefa44862fdef934558565bbefcc6fb) — Node.js sessionless helpers, feature flag, and verified package/runtime pairing.
+13. [Published v1.0.34 .NET generated RPC source](https://raw.githubusercontent.com/microsoft/copilot-sdk/v1.0.34/dotnet/src/Generated/Rpc.cs) — `ServerDecisionsApi.AskAsync`, decision request/result types, limits, and experimental annotations. Also verified against the installed NuGet assembly and XML documentation.
+14. [GitHub.Copilot.SDK 1.0.34](https://www.nuget.org/packages/GitHub.Copilot.SDK/1.0.34) — published package. Its installed `build/GitHub.Copilot.SDK.props` pins `CopilotCliVersion` to `1.0.112`.
