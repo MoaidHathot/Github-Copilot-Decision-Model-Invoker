@@ -9,6 +9,8 @@
         "W:/Playground/GHCP-Decision/Decision.cs",
         "--",
         "mcp",
+        "--transport",
+        "sdk",
         "--auth",
         "copilot-cli"
       ]

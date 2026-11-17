@@ -1,6 +1,8 @@
 #!/usr/bin/env -S dotnet --
 #:include ../Decision.cs
 #:property StartupObject=DecisionTests
+#:property CopilotSkipCliDownload=true
+#:include Decision.Sdk.Tests.cs
 
 using System.Diagnostics;
 using System.Net;
@@ -11,7 +13,7 @@ using System.Text.Json.Nodes;
 using ModelContextProtocol.Client;
 
 // File-based contract tests: no test project and no live inference unless --live is supplied.
-public static class DecisionTests
+public static partial class DecisionTests
 {
     private static readonly string Root = Path.GetFullPath(Path.Combine(SourceDirectory(), ".."));
     private static readonly DecisionRequest Ticket = JsonData.ReadRequest(File.ReadAllText(Path.Combine(Root, "examples", "ticket.json")));
@@ -33,6 +35,8 @@ public static class DecisionTests
             ("Timeout and caller cancellation", Cancellation),
             ("Configuration precedence and CLI validation", ConfigurationAndCli),
             ("Environment credential handling", EnvironmentCredentials),
+            ("SDK lifecycle, defaults, and normalized results", SdkProvider),
+            ("SDK limits, errors, and authentication selection", SdkConstraints),
             ("MCP stdio schema, structured result, and validation", () => Mcp(live: false))
         ];
         try
@@ -283,7 +287,7 @@ public static class DecisionTests
 
     private static Task ConfigurationAndCli()
     {
-        using var environment = new EnvironmentScope("DECISION_PROVIDER", "DECISION_MODEL", "DECISION_ENDPOINT", "DECISION_AUTH", "DECISION_CONFIG", "DECISION_PROFILE", "DECISION_TIMEOUT_SECONDS", "DECISION_PROTOCOL");
+        using var environment = new EnvironmentScope("DECISION_PROVIDER", "DECISION_MODEL", "DECISION_ENDPOINT", "DECISION_AUTH", "DECISION_CONFIG", "DECISION_PROFILE", "DECISION_TIMEOUT_SECONDS", "DECISION_PROTOCOL", "DECISION_TRANSPORT", "DECISION_COPILOT_CLI_PATH");
         string file = Path.Combine(Root, "decision.config.example.json");
         Environment.SetEnvironmentVariable("DECISION_MODEL", "environment-model");
         var options = Configuration.Load(CliArguments.Parse(["models", "--config", file, "--profile", "luna"]));
@@ -363,6 +367,7 @@ public static class DecisionTests
             Check(result.IsError != true && result.StructuredContent is not null, $"live MCP result for {model}");
             var normalized = JsonSerializer.SerializeToElement(result.StructuredContent);
             Equal(model, normalized.GetProperty("requestedModel").GetString());
+            Equal("sdk", normalized.GetProperty("transport").GetString());
             Equal("billing", normalized.GetProperty("answers").GetProperty("team").GetProperty("choice").GetString());
         }
     }

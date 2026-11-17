@@ -1,0 +1,41 @@
+{
+  "model": "gpt-6-luna-decisions",
+  "upstreamModel": "gpt-6-luna",
+  "latencyMs": 123,
+  "answers": [
+    { "kind": "boolean", "name": "refund", "probability": 0.97 },
+    {
+      "kind": "choice",
+      "name": "team",
+      "value": "billing",
+      "confidence": 0.7,
+      "vendorConfidence": 0.65,
+      "tied": false,
+      "probabilities": [
+        { "value": "billing", "probability": 0.8 },
+        { "value": "engineering", "probability": 0.1 },
+        { "value": "support", "probability": 0.1 }
+      ]
+    },
+    {
+      "kind": "score",
+      "name": "severity",
+      "score": 1.4,
+      "level": "High",
+      "confidence": 0.25,
+      "vendorConfidence": 0.3,
+      "probabilities": [
+        { "label": "Low", "probability": 0.1 },
+        { "label": "Medium", "probability": 0.4 },
+        { "label": "High", "probability": 0.5 }
+      ]
+    }
+  ],
+  "usage": {
+    "inputTokens": 100,
+    "outputTokens": 0,
+    "cachedInputTokens": 20,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0
+  }
+}

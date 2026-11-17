@@ -7,9 +7,9 @@
 1. **Both requested decision models are accessible through the Copilot hosting service for the tested login.** Their exact catalog IDs are `microsoft-decision-1` and `gpt-6-luna-decisions`.
 2. Both appear in authenticated `GET https://api.githubcopilot.com/models` with `capabilities.type: "decisions"` and `model_picker_enabled: false`. A client that only lists chat/picker models will miss them.
 3. They require **different wire protocols**. One provider/authentication implementation can support both by selecting a protocol adapter from `supported_endpoints`.
-4. Existing **Copilot CLI and GitHub CLI browser logins both worked**. No PAT was created. HTTP still uses an OAuth bearer token internally; the utility retrieves it from the existing credential store/helper.
+4. Existing **Copilot CLI and GitHub CLI browser logins both worked**. No PAT was created. The default SDK transport delegates saved-login authentication to the runtime; the explicit HTTP transport uses the existing credential store/helper.
 5. Microsoft Foundry provides documented endpoints for both models, with Entra ID or key authentication. Foundry billing is separate from the Copilot subscription.
-6. **The published .NET Copilot SDK can call both models directly through its sessionless RPC API.** `GitHub.Copilot.SDK` 1.0.34 and runtime 1.0.112 (protocol 3) were live-tested with `UseLoggedInUser = true` and the `DECISIONS_API` feature flag. See [SDK-REVIEW.md](SDK-REVIEW.md) for limits and migration tradeoffs.
+6. **The published .NET Copilot SDK can call both models directly through its sessionless RPC API and is now the application's default Copilot transport.** `GitHub.Copilot.SDK` 1.0.34 and runtime 1.0.112 (protocol 3) were live-tested with `UseLoggedInUser = true` and the `DECISIONS_API` feature flag. `--transport http` selects the HTTP implementation. See [SDK-REVIEW.md](SDK-REVIEW.md) for effective limits and result semantics.
 
 ## Verified Copilot routes
 
@@ -84,7 +84,7 @@ The utility adds a fresh `X-Request-Id`. This header set was tested; the experim
 - Authenticated discovery through `gh` returned both decision models, with the paths above.
 - Direct requests through the GitHub CLI credential returned **HTTP 200** for both models, with predicate, choice, and score questions in each request.
 - The built .NET utility reused the selected Copilot CLI account from Windows Credential Manager and successfully discovered and called both models.
-- A real MCP client initialized the stdio server, discovered its typed tools, and successfully invoked both models using the same saved Copilot CLI login. The updated verification run passed 13 offline test groups plus the live MCP checks (150 assertions), including an omitted tool-call model inheriting `--default-model` and a per-call model override.
+- A real MCP client initialized the stdio server, discovered its typed tools, and successfully invoked both models using the same saved Copilot CLI login, including an omitted tool-call model inheriting `--default-model` and a per-call model override. The test suite also covers the SDK provider's lifetime, effective limits, account selection, and confidence mapping.
 - `microsoft-decision-1` returned underlying model name `microsoft-decision-1.1`; `gpt-6-luna-decisions` returned `gpt-6-luna`. Both requested and returned names are preserved in results.
 - The support-ticket choice was `billing` in both cases. This verifies integration, not general model accuracy or calibration.
 - Raw response fixtures are in `tests/fixtures/`. They contain sample answers and usage, not credentials.
@@ -95,11 +95,11 @@ No Azure deployment or direct OpenAI key was provided for live verification. Ima
 
 ## Authentication findings
 
-The official Copilot CLI docs describe OAuth browser/device login, OS credential storage under service `copilot-cli`, and fallback to `gh auth token` [1]. The SDK also documents stored-user authentication [2]. The utility reuses these credentials without starting an agent session.
+The official Copilot CLI docs describe OAuth browser/device login, OS credential storage under service `copilot-cli`, and fallback to `gh auth token` [1]. The SDK also documents stored-user authentication [2]. The utility uses the runtime's authentication for its default SDK transport, and its own credential readers for HTTP, without starting an agent session.
 
-On this machine, the current CLI configuration was **JSON with comments** and used `lastLoggedInUser` / `loggedInUsers`. Older and newer credential target layouts coexisted. One old stored credential returned 401, while newer layouts worked. The implementation therefore reads only entries for the selected account and prefers the newest Windows credential by its stored timestamp.
+On this machine, the current CLI configuration was **JSON with comments** and used `lastLoggedInUser` / `loggedInUsers`. Older and newer credential target layouts coexisted. One old stored credential returned 401, while newer layouts worked. The HTTP implementation therefore reads only entries for the selected account and prefers the newest Windows credential by its stored timestamp. SDK saved-login mode delegates this storage behavior to the runtime.
 
-Older community integrations exchange a GitHub token at `/copilot_internal/v2/token` before using the Copilot gateway [3]. In this investigation that exchange returned **403 for the GitHub CLI credential**, while sending the same credential directly to the gateway returned 200. The implemented path is the working **direct bearer-token** path; it does not depend on that exchange.
+Older community integrations exchange a GitHub token at `/copilot_internal/v2/token` before using the Copilot gateway [3]. In this investigation that exchange returned **403 for the GitHub CLI credential**, while sending the same credential directly to the gateway returned 200. The HTTP transport uses the working **direct bearer-token** path. SDK authentication is managed by the runtime.
 
 The OS credential-store layout and direct inference interface are implementation details, not a public compatibility guarantee. The portable saved-login alternative is the GitHub CLI helper. Reauthentication uses the official `copilot login` or `gh auth login` flow.
 
@@ -116,7 +116,7 @@ The .NET equivalents verified in package 1.0.34 are:
 
 These calls need no chat session. The runtime must have `COPILOT_CLI_ENABLED_FEATURE_FLAGS=DECISIONS_API`, and the experimental C# API requires an explicit `GHCP001` diagnostic opt-in. The verified SDK/runtime pair is 1.0.34 / 1.0.112, using protocol 3; the NuGet package pins that runtime version in its build props [14]. The gist reports a protocol mismatch with a newer protocol-4 CLI, so compatible version selection matters.
 
-For a long-running MCP server, an SDK-backed provider would be preferable for maintained authentication, account discovery, and shared protocol handling. Its runtime limits and normalization differ from the current direct-HTTP implementation; [SDK-REVIEW.md](SDK-REVIEW.md) records the verified differences. The SDK's default on this account was Luna, so the utility's Microsoft default must be passed explicitly.
+The implemented SDK-backed provider shares one persistent runtime client for maintained authentication, discovery, and protocol handling. Its effective limits and normalization differ from HTTP; [SDK-REVIEW.md](SDK-REVIEW.md) records the verified differences and mapping. The SDK's default on this account was Luna, so the utility always passes its resolved Microsoft default or explicit model override.
 
 Copilot's raw HTTP endpoints remain internal, and the typed SDK Decisions surface is explicitly experimental. The official general Copilot model list [5] covers the regular product surfaces; use decision-specific discovery for this workload.
 
@@ -151,7 +151,8 @@ CLI / MCP
 DecisionService + common typed request/result
     |
 IDecisionProvider
-    +-- CopilotDecisionProvider ---- saved login + account model discovery
+    +-- CopilotSdkDecisionProvider - default: sessionless SDK + runtime login
+    +-- CopilotDecisionProvider ---- explicit HTTP + account model discovery
     +-- FoundryDecisionProvider ---- Entra / API key + deployment configuration
     +-- OpenAiDecisionProvider ----- API key
     |
@@ -160,7 +161,7 @@ IDecisionProtocol
     +-- DecisionsProtocol ---------- input, named array, predicate, choices/levels
 ```
 
-**One Copilot provider is sufficient for both models.** The current HTTP implementation needs two protocol adapters; an SDK-backed implementation can delegate that translation to the Copilot runtime. Foundry reuses the HTTP adapters while supplying its own paths, credentials, and deployment names. Arbitrary Foundry deployment names make an explicit protocol setting preferable to guessing from the name.
+**Each Copilot transport supports both models.** The SDK implementation delegates protocol translation to the runtime. HTTP needs the two protocol adapters, which Foundry also reuses with its own paths, credentials, and deployment names. Arbitrary Foundry deployment names make an explicit protocol setting preferable to guessing from the name.
 
 ## Sources
 

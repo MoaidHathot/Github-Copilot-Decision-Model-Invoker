@@ -3,12 +3,20 @@
   "profiles": {
     "copilot": {
       "provider": "copilot",
+      "transport": "sdk",
       "model": "microsoft-decision-1",
       "auth": "auto"
     },
     "luna": {
       "provider": "copilot",
+      "transport": "sdk",
       "model": "gpt-6-luna-decisions",
+      "auth": "auto"
+    },
+    "copilot-http": {
+      "provider": "copilot",
+      "transport": "http",
+      "model": "microsoft-decision-1",
       "auth": "auto"
     },
     "foundry-ms": {

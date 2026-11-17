@@ -6,7 +6,9 @@
 #:package ModelContextProtocol@1.4.1
 #:package Microsoft.Extensions.Hosting@11.0.0
 #:package Azure.Identity@1.21.0
+#:package GitHub.Copilot.SDK@1.0.34
 
+using System.Collections;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Globalization;
@@ -25,6 +27,8 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using ModelContextProtocol;
 using ModelContextProtocol.Server;
+using CopilotSdk = GitHub.Copilot;
+using CopilotRpc = GitHub.Copilot.Rpc;
 
 public static class Program
 {
@@ -87,8 +91,15 @@ public sealed record ScoreQuestion(string Instructions, string[] Levels) : Decis
 [JsonDerivedType(typeof(RefusalAnswer), "refusal")]
 public closed record DecisionAnswer;
 public sealed record PredicateAnswer(double Probability) : DecisionAnswer;
-public sealed record ChoiceAnswer(string Choice, Dictionary<string, double> Probabilities, double? Confidence) : DecisionAnswer;
-public sealed record ScoreAnswer(double Score, double[] Probabilities, string[] Levels, double? Confidence) : DecisionAnswer;
+public sealed record ChoiceAnswer(string Choice, Dictionary<string, double> Probabilities, double? Confidence) : DecisionAnswer
+{
+    public double? NormalizedConfidence { get; init; }
+    public bool? Tied { get; init; }
+}
+public sealed record ScoreAnswer(double Score, double[] Probabilities, string[] Levels, double? Confidence) : DecisionAnswer
+{
+    public double? NormalizedConfidence { get; init; }
+}
 public sealed record RefusalAnswer(string? Reason) : DecisionAnswer;
 
 public sealed record DecisionResult(
@@ -101,6 +112,8 @@ public sealed record DecisionResult(
     Dictionary<string, DecisionAnswer> Answers,
     JsonElement? Usage)
 {
+    public string Transport { get; init; } = "http";
+    public string RawFormat { get; init; } = "provider-json";
     [JsonIgnore] public JsonElement Raw { get; init; }
 }
 
@@ -109,9 +122,20 @@ public sealed record DecisionModel(
     string Name,
     string[] SupportedEndpoints,
     bool? ModelPickerEnabled = null,
-    string? PolicyState = null);
+    string? PolicyState = null)
+{
+    public bool? IsRuntimeDefault { get; init; }
+    public DecisionLimits? Limits { get; init; }
+}
 
-public sealed record ModelCatalog(string Provider, string Source, string Endpoint, string? CredentialSource, DecisionModel[] Models);
+public sealed record DecisionLimits(long MaxQuestions, long MinChoices, long MaxChoices, long MinLevels,
+    long MaxLevels, long MaxRequestBytes, long MaxJsonDepth, long? ContextPlusQuestionTokens);
+
+public sealed record ModelCatalog(string Provider, string Source, string Endpoint, string? CredentialSource, DecisionModel[] Models)
+{
+    public string Transport { get; init; } = "http";
+    public string? DefaultModel { get; init; }
+}
 
 public interface IDecisionProvider
 {
@@ -313,10 +337,14 @@ public sealed record ProviderOptions
     public string? Endpoint { get; init; }
     public string Protocol { get; init; } = "auto";
     public string Auth { get; init; } = "auto";
+    public string Transport { get; init; } = "auto";
+    public string? CopilotCliPath { get; init; }
     public string? Account { get; init; }
     public string? CopilotConfig { get; init; }
     public string? ApiKeyEnv { get; init; }
     public int TimeoutSeconds { get; init; } = 60;
+
+    [JsonIgnore] public string EffectiveTransport => Transport == "auto" ? Provider == "copilot" ? "sdk" : "http" : Transport;
 
     public string EffectiveModel(string? model)
     {
@@ -335,6 +363,17 @@ public sealed record ProviderOptions
             throw new DecisionException("provider must be copilot, foundry, or openai.");
         if (Protocol is not ("auto" or "systemone" or "decisions"))
             throw new DecisionException("protocol must be auto, systemone, or decisions.");
+        if (Transport is not ("auto" or "sdk" or "http") || Provider != "copilot" && EffectiveTransport != "http")
+            throw new DecisionException("transport must be auto, sdk, or http. Only Copilot supports sdk.");
+        if (Provider == "copilot" && EffectiveTransport == "sdk")
+        {
+            if (Endpoint is not null || Protocol != "auto")
+                throw new DecisionException("The Copilot SDK owns its endpoints and protocol. Use --transport http with --endpoint or --protocol.");
+            if (CopilotConfig is not null && !Path.GetFileName(CopilotConfig).Equals("config.json", StringComparison.OrdinalIgnoreCase))
+                throw new DecisionException("The SDK requires a Copilot config named config.json. Use --transport http for other filenames.");
+        }
+        else if (CopilotCliPath is not null)
+            throw new DecisionException("--copilot-cli-path is only used with the Copilot SDK transport.");
         if (TimeoutSeconds is < 1 or > 3600)
             throw new DecisionException("timeoutSeconds must be between 1 and 3600.");
         if (Model is not null && string.IsNullOrWhiteSpace(Model))
@@ -506,6 +545,351 @@ public sealed class OpenAiDecisionProvider(ProviderOptions options, HttpClient h
     protected override async Task<DecisionTarget> ResolveAsync(string model, CancellationToken cancellationToken) =>
         new(model, endpoint, new DecisionsProtocol(), await credentials.GetAsync(cancellationToken));
 }
+
+#pragma warning disable GHCP001 // Opt in to the pinned SDK's experimental sessionless Decisions RPC.
+
+public sealed record SdkDecisionCall(CopilotRpc.DecisionContext Context, IList<CopilotRpc.DecisionQuestion> Questions,
+    string Model, int TimeoutMs, string? SelectionId);
+
+// Small runtime boundary for offline provider/lifecycle tests. The production implementation owns one SDK client.
+public interface ICopilotDecisionRuntime : IAsyncDisposable
+{
+    string CredentialSource { get; }
+    string? SelectionId { get; }
+    Task StartAsync(CancellationToken cancellationToken);
+    Task<IReadOnlyList<CopilotRpc.DecisionModelInfo>> ListModelsAsync(CancellationToken cancellationToken);
+    Task<CopilotRpc.DecisionsAskResult> AskAsync(SdkDecisionCall call, CancellationToken cancellationToken);
+}
+
+public sealed class CopilotDecisionRuntime(ProviderOptions options) : ICopilotDecisionRuntime
+{
+    private CopilotSdk.CopilotClient? client;
+    public string CredentialSource { get; private set; } = "copilot-sdk";
+    public string? SelectionId => null;
+
+    internal static Dictionary<string, string> ChildEnvironment(ProviderOptions options)
+    {
+        var environment = Environment.GetEnvironmentVariables().Cast<DictionaryEntry>()
+            .ToDictionary(e => (string)e.Key, e => (string)e.Value!, OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        // The flag belongs to this runtime process, not the machine or the MCP client's environment.
+        environment["COPILOT_CLI_ENABLED_FEATURE_FLAGS"] = "DECISIONS_API";
+        if (options.Auth != "auto" || options.Account is not null)
+            foreach (string name in new[] { "COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN" }) environment.Remove(name);
+        return environment;
+    }
+
+    public async Task StartAsync(CancellationToken cancellationToken)
+    {
+        // 1.0.34's account.getAllUsers binding requires a gh-cli token that the runtime redacts.
+        // Resolve an explicitly named account through the existing login helper instead of that broken roster API.
+        Credential? explicitCredential = options.Auth is "gh" or "env" || options.Account is not null
+            ? await new CopilotCredentialSource(options).GetAsync(cancellationToken) : null;
+        string? executable = options.CopilotCliPath;
+        if (executable is not null)
+        {
+            executable = Path.GetFullPath(executable);
+            if (!File.Exists(executable)) throw new DecisionException("The --copilot-cli-path executable does not exist.");
+        }
+        var candidate = new CopilotSdk.CopilotClient(new CopilotSdk.CopilotClientOptions
+        {
+            Connection = CopilotSdk.RuntimeConnection.ForStdio(path: executable, args: executable is null ? null : ["--no-auto-update"]),
+            Environment = ChildEnvironment(options),
+            UseLoggedInUser = explicitCredential is null,
+            GitHubToken = explicitCredential?.Value,
+            BaseDirectory = options.CopilotConfig is null ? null : Path.GetDirectoryName(Path.GetFullPath(options.CopilotConfig)),
+            LogLevel = CopilotSdk.CopilotLogLevel.None
+        });
+        try
+        {
+            await candidate.StartAsync(cancellationToken);
+            var status = await candidate.GetStatusAsync(cancellationToken);
+            if (status.ProtocolVersion != 3)
+                throw new DecisionException("GitHub.Copilot.SDK 1.0.34 requires protocol 3. Use its bundled runtime or CLI 1.0.112.");
+            var auth = await candidate.GetAuthStatusAsync(cancellationToken);
+            if (!auth.IsAuthenticated || explicitCredential is null && options.Auth == "copilot-cli" && auth.AuthType != "user")
+                throw new DecisionException("No matching Copilot CLI login. Run 'copilot login', or select --auth gh.");
+            CredentialSource = explicitCredential?.Source ?? $"copilot-sdk:{auth.AuthType}:{auth.Login ?? "current"}";
+            client = candidate;
+        }
+        catch
+        {
+            await candidate.DisposeAsync();
+            throw;
+        }
+    }
+
+    public async Task<IReadOnlyList<CopilotRpc.DecisionModelInfo>> ListModelsAsync(CancellationToken cancellationToken)
+    {
+        var result = await client!.Rpc.Models.ListAsync(selectionId: SelectionId, cancellationToken: cancellationToken);
+        return result.DecisionModels?.ToArray()
+            ?? throw new DecisionException("The runtime did not expose decisionModels. Use the matching SDK runtime with DECISIONS_API enabled.");
+    }
+
+    public Task<CopilotRpc.DecisionsAskResult> AskAsync(SdkDecisionCall call, CancellationToken cancellationToken)
+    {
+        var current = client ?? throw new InvalidOperationException("The SDK runtime is not running.");
+        return current.Rpc.Decisions.AskAsync(call.Context, call.Questions, selectionId: call.SelectionId,
+            model: call.Model, timeoutMs: call.TimeoutMs, cancellationToken: cancellationToken);
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (client is { } owned)
+        {
+            client = null;
+            await owned.DisposeAsync();
+        }
+    }
+}
+
+public sealed class CopilotSdkDecisionProvider : IDecisionProvider, IAsyncDisposable
+{
+    private readonly ProviderOptions options;
+    private readonly ICopilotDecisionRuntime runtime;
+    private readonly SemaphoreSlim gate = new(1, 1);
+    private bool started;
+    private bool disposed;
+    private CopilotRpc.DecisionModelInfo[]? models;
+    private DateTimeOffset catalogExpires;
+
+    public CopilotSdkDecisionProvider(ProviderOptions options, ICopilotDecisionRuntime? runtime = null)
+    {
+        this.options = options;
+        this.runtime = runtime ?? new CopilotDecisionRuntime(options);
+    }
+
+    private async Task<CopilotRpc.DecisionModelInfo[]> ModelsAsync(CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(disposed, this);
+        await gate.WaitAsync(cancellationToken);
+        try
+        {
+            ObjectDisposedException.ThrowIf(disposed, this);
+            if (!started) { await runtime.StartAsync(cancellationToken); started = true; }
+            if (models is null || catalogExpires <= DateTimeOffset.UtcNow)
+            {
+                models = (await runtime.ListModelsAsync(cancellationToken)).ToArray();
+                catalogExpires = DateTimeOffset.UtcNow.AddMinutes(5);
+            }
+            return models;
+        }
+        finally { gate.Release(); }
+    }
+
+    public Task<ModelCatalog> ListModelsAsync(CancellationToken cancellationToken) => GuardAsync(async () =>
+    {
+        var available = await ModelsAsync(cancellationToken);
+        return new ModelCatalog("copilot", "Copilot SDK models.list / decisionModels", "copilot-sdk://decisions.ask",
+            runtime.CredentialSource, available.Select(m => new DecisionModel(m.Id, m.Name, [])
+            {
+                IsRuntimeDefault = m.IsDefault,
+                Limits = Limits(m.Limits)
+            }).ToArray()) { Transport = "sdk", DefaultModel = CanonicalModel(options.EffectiveModel(null)) };
+    });
+
+    public Task<DecisionResult> DecideAsync(DecisionRequest request, string? model, CancellationToken cancellationToken) => GuardAsync(async () =>
+    {
+        request.Validate();
+        if (request.Images is { Length: > 0 })
+            throw new DecisionException("The Copilot SDK supports text and JSON context only. Use --transport http for image requests.");
+        var watch = Stopwatch.StartNew();
+        string requested = CanonicalModel(options.EffectiveModel(model));
+        var available = await ModelsAsync(cancellationToken);
+        var selected = available.FirstOrDefault(m => m.Id.Equals(requested, StringComparison.OrdinalIgnoreCase))
+            ?? throw new DecisionException($"Decision model '{requested}' is not advertised by this Copilot SDK login. Run 'models'.");
+        // --timeout is the whole operation's budget; the SDK RPC also has its own documented 30s maximum.
+        var call = SdkMapping.CreateCall(request, selected.Id, Math.Min(options.TimeoutSeconds, 30) * 1000, runtime.SelectionId);
+        SdkMapping.ValidateCall(call, request, Limits(selected.Limits));
+        var response = await runtime.AskAsync(call, cancellationToken);
+        if (response.Model != selected.Id)
+            throw new DecisionException("Invalid provider response: the SDK returned a different requested model.");
+        var answers = SdkMapping.ReadAnswers(response, request);
+        return new DecisionResult("copilot", selected.Id, response.UpstreamModel ?? response.Model, "decisions.ask",
+            runtime.CredentialSource, watch.Elapsed.TotalMilliseconds, answers, SdkMapping.Usage(response.Usage))
+        {
+            Transport = "sdk", RawFormat = "copilot-sdk-json",
+            Raw = JsonSerializer.SerializeToElement(response, JsonData.Options)
+        };
+    });
+
+    internal static string CanonicalModel(string model) => model.Equals("gpt-6-luna-decision", StringComparison.OrdinalIgnoreCase) ? "gpt-6-luna-decisions" : model;
+
+    private static DecisionLimits Limits(CopilotRpc.DecisionModelLimits limits) => new(limits.MaxQuestions,
+        limits.MinOptions, limits.MaxOptions, limits.MinLevels, limits.MaxLevels, limits.MaxRequestBytes,
+        limits.MaxJsonDepth, limits.ContextPlusQuestionTokens);
+
+    private static async Task<T> GuardAsync<T>(Func<Task<T>> action)
+    {
+        try { return await action(); }
+        catch (Exception e) when (e is IOException or CopilotSdk.RemoteRpcException or Win32Exception or InvalidOperationException or JsonException)
+        { throw SdkMapping.Error(e); }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        await gate.WaitAsync();
+        try
+        {
+            if (disposed) return;
+            disposed = true;
+            await runtime.DisposeAsync();
+        }
+        finally { gate.Release(); } // Queued requests can still unwind and observe the disposed state.
+    }
+}
+
+public static class SdkMapping
+{
+    public static SdkDecisionCall CreateCall(DecisionRequest request, string model, int timeoutMs, string? selectionId)
+    {
+        CopilotRpc.DecisionContext context = request.State.ValueKind == JsonValueKind.Object ||
+            request.State.ValueKind == JsonValueKind.Array && request.State.EnumerateArray().All(v => v.ValueKind == JsonValueKind.Object)
+            ? new CopilotRpc.DecisionContextJson { Value = request.State }
+            : new CopilotRpc.DecisionContextText { Text = request.State.ValueKind == JsonValueKind.String ? request.State.GetString()! : request.State.GetRawText() };
+        var questions = request.Questions.Select(p => p.Value switch
+        {
+            PredicateQuestion q => (CopilotRpc.DecisionQuestion)new CopilotRpc.DecisionQuestionBoolean { Name = p.Key, Instructions = q.Instructions },
+            ChoiceQuestion q => new CopilotRpc.DecisionQuestionChoice
+            {
+                Name = p.Key, Instructions = q.Instructions,
+                Options = q.Choices.Select(c => new CopilotRpc.DecisionOption { Value = c.Key, Description = c.Value }).ToArray()
+            },
+            ScoreQuestion q => new CopilotRpc.DecisionQuestionScore
+            {
+                Name = p.Key, Instructions = q.Instructions,
+                Levels = q.Levels.Select(l => new CopilotRpc.DecisionLevel { Label = l, Description = l }).ToArray()
+            }
+        }).ToArray();
+        return new(context, questions, model, timeoutMs, selectionId);
+    }
+
+    public static void ValidateCall(SdkDecisionCall call, DecisionRequest request, DecisionLimits limits)
+    {
+        if (limits.MaxQuestions < 1 || limits.MinChoices < 2 || limits.MaxChoices < limits.MinChoices ||
+            limits.MinLevels < 2 || limits.MaxLevels < limits.MinLevels || limits.MaxRequestBytes < 1 || limits.MaxJsonDepth < 1)
+            throw new DecisionException("The SDK catalog returned invalid request limits.");
+        if (request.Questions.Count > limits.MaxQuestions)
+            throw new DecisionException($"This SDK model allows at most {limits.MaxQuestions} questions. Use --transport http for a different request contract.");
+        foreach (var (name, question) in request.Questions)
+        {
+            if (question is ChoiceQuestion choice)
+            {
+                if (choice.Choices.Count < limits.MinChoices || choice.Choices.Count > limits.MaxChoices)
+                    throw new DecisionException($"SDK question '{name}' requires {limits.MinChoices}-{limits.MaxChoices} choices.");
+                if (choice.Choices.Keys.Any(k => k.Length is < 1 or > 64 || k.Any(c => !char.IsAsciiLetterOrDigit(c) && !"._:/@-".Contains(c))))
+                    throw new DecisionException($"SDK choice values in '{name}' must be 1-64 characters using ASCII letters, digits, or ._:/@-.");
+            }
+            if (question is ScoreQuestion score && (score.Levels.Length < limits.MinLevels || score.Levels.Length > limits.MaxLevels))
+                throw new DecisionException($"SDK question '{name}' requires {limits.MinLevels}-{limits.MaxLevels} levels.");
+        }
+        if (call.Context is CopilotRpc.DecisionContextJson json && JsonDepth(json.Value) > limits.MaxJsonDepth)
+            throw new DecisionException($"SDK JSON context exceeds the {limits.MaxJsonDepth}-level nesting limit.");
+        if (JsonSerializer.SerializeToUtf8Bytes(call, JsonData.Options).LongLength > limits.MaxRequestBytes)
+            throw new DecisionException($"SDK request exceeds {limits.MaxRequestBytes} serialized bytes. Use --transport http for a different request contract.");
+    }
+
+    private static int JsonDepth(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Object => 1 + value.EnumerateObject().Select(p => JsonDepth(p.Value)).DefaultIfEmpty().Max(),
+        JsonValueKind.Array => 1 + value.EnumerateArray().Select(JsonDepth).DefaultIfEmpty().Max(),
+        _ => 0
+    };
+
+    public static Dictionary<string, DecisionAnswer> ReadAnswers(CopilotRpc.DecisionsAskResult response, DecisionRequest request)
+    {
+        static string Name(CopilotRpc.DecisionAnswer answer) => answer switch
+        {
+            CopilotRpc.DecisionAnswerBoolean b => b.Name,
+            CopilotRpc.DecisionAnswerChoice c => c.Name,
+            CopilotRpc.DecisionAnswerScore s => s.Name,
+            CopilotRpc.DecisionAnswerRefused r => r.Name,
+            _ => throw new DecisionException("Invalid provider response: unknown SDK answer kind.")
+        };
+        Wire.CheckNames(response.Answers.Select(Name), request);
+        Dictionary<string, DecisionAnswer> result = new(StringComparer.Ordinal);
+        foreach (var answer in response.Answers)
+        {
+            string name = Name(answer);
+            JsonObject normalized;
+            if (answer is CopilotRpc.DecisionAnswerRefused) { result[name] = new RefusalAnswer(null); continue; }
+            if (answer is CopilotRpc.DecisionAnswerBoolean b)
+                normalized = new() { ["type"] = "predicate", ["probability"] = b.Probability };
+            else if (answer is CopilotRpc.DecisionAnswerChoice c)
+                normalized = new()
+                {
+                    ["type"] = "choice", ["choice"] = c.Value, ["confidence"] = c.VendorConfidence,
+                    ["probabilities"] = JsonData.Node(c.Probabilities.Select(p => new { value = p.Value, probability = p.Probability }).ToArray())
+                };
+            else if (answer is CopilotRpc.DecisionAnswerScore s)
+            {
+                if (request.Questions[name] is not ScoreQuestion q || !s.Probabilities.Select(p => p.Label).SequenceEqual(q.Levels))
+                    throw new DecisionException("Invalid provider response: SDK score levels do not match the request order.");
+                normalized = new()
+                {
+                    ["type"] = "score", ["score"] = s.Score, ["confidence"] = s.VendorConfidence,
+                    ["probabilities"] = JsonData.Node(s.Probabilities.Select((p, index) => new { value = index, probability = p.Probability }).ToArray())
+                };
+            }
+            else throw new DecisionException("Invalid provider response: unknown SDK answer kind.");
+            var parsed = Wire.ReadAnswer(JsonSerializer.SerializeToElement(normalized), request.Questions[name], systemOne: false);
+            // Preserve vendor confidence in the existing field; expose SDK normalization separately.
+            result[name] = (parsed, answer) switch
+            {
+                (ChoiceAnswer choice, CopilotRpc.DecisionAnswerChoice sdk) => choice with { NormalizedConfidence = Probability(sdk.Confidence), Tied = sdk.Tied },
+                (ScoreAnswer score, CopilotRpc.DecisionAnswerScore sdk) => score with { NormalizedConfidence = Probability(sdk.Confidence) },
+                _ => parsed
+            };
+        }
+        return result;
+    }
+
+    private static double Probability(double value) => double.IsFinite(value) && value is >= 0 and <= 1
+        ? value : throw new DecisionException("Invalid provider response: SDK confidence must be a probability-range value.");
+
+    public static JsonElement? Usage(CopilotRpc.DecisionUsage? usage)
+    {
+        if (usage is null) return null;
+        JsonObject result = new() { ["input_tokens"] = usage.InputTokens, ["output_tokens"] = usage.OutputTokens };
+        JsonObject details = [];
+        if (usage.CachedInputTokens is { } cached) details["cached_tokens"] = cached;
+        if (usage.CacheWriteTokens is { } written) details["cache_write_tokens"] = written;
+        if (details.Count > 0) result["input_tokens_details"] = details;
+        if (usage.ReasoningTokens is { } reasoning) result["output_tokens_details"] = new JsonObject { ["reasoning_tokens"] = reasoning };
+        return JsonSerializer.SerializeToElement(result);
+    }
+
+    public static DecisionException Error(Exception exception)
+    {
+        for (Exception? current = exception; current is not null; current = current.InnerException)
+        {
+            if (current is not CopilotSdk.RemoteRpcException remote) continue;
+            if (remote.ErrorData is { ValueKind: JsonValueKind.Object } data && data.TryGetProperty("kind", out var kind) && kind.ValueKind == JsonValueKind.String)
+            {
+                string? code = kind.GetString();
+                string message = code switch
+                {
+                    "notEnabled" => "The runtime's DECISIONS_API feature is not enabled.",
+                    "noModel" => "The selected model is unavailable for this account; run 'models'.",
+                    "unauthenticated" => "Authentication failed; run 'copilot login' or check the selected credential.",
+                    "invalidRequest" or "tooLarge" => "The request exceeds a runtime rule, size, or token limit; check 'models' or select --transport http.",
+                    "rateLimited" => "Rate limited.",
+                    "timeout" => "The SDK decision deadline expired (at most 30 seconds per RPC).",
+                    "unavailable" or "overloaded" => "The decision service is currently unavailable.",
+                    "upstreamProtocol" => "The runtime could not interpret the upstream decision response.",
+                    _ => "The runtime rejected the decision request."
+                };
+                if (data.TryGetProperty("retryAfterMs", out var retry) && retry.ValueKind == JsonValueKind.Number && retry.TryGetInt64(out long ms) && ms >= 0)
+                    message += $" Retry-After: {ms} ms.";
+                return new DecisionException($"Copilot SDK: {message}");
+            }
+            return new DecisionException($"Copilot SDK RPC failed (code {remote.ErrorCode}). Use the matching runtime and authenticate with Copilot.");
+        }
+        // Never echo arbitrary SDK/backend exception bodies: they can include authentication details.
+        return new DecisionException("Copilot SDK runtime connection failed. Use the bundled runtime or --copilot-cli-path pointing to compatible CLI 1.0.112, or select --transport http.");
+    }
+}
+
+#pragma warning restore GHCP001
 
 public static class HttpTransport
 {
@@ -795,7 +1179,7 @@ public static class ChildProcess
     }
 }
 
-public sealed class DecisionService
+public sealed class DecisionService : IAsyncDisposable
 {
     private readonly ProviderOptions options;
     private readonly IDecisionProvider provider;
@@ -806,6 +1190,7 @@ public sealed class DecisionService
         this.options = options;
         this.provider = provider ?? (options.Provider switch
         {
+            "copilot" when options.EffectiveTransport == "sdk" => new CopilotSdkDecisionProvider(options),
             "copilot" => new CopilotDecisionProvider(options, http),
             "foundry" => new FoundryDecisionProvider(options, http),
             "openai" => new OpenAiDecisionProvider(options, http),
@@ -817,6 +1202,8 @@ public sealed class DecisionService
         WithTimeoutAsync(ct => provider.DecideAsync(request, model, ct), cancellationToken);
 
     public Task<ModelCatalog> ModelsAsync(CancellationToken cancellationToken) => WithTimeoutAsync(provider.ListModelsAsync, cancellationToken);
+
+    public ValueTask DisposeAsync() => provider is IAsyncDisposable disposable ? disposable.DisposeAsync() : ValueTask.CompletedTask;
 
     private async Task<T> WithTimeoutAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken)
     {
@@ -835,7 +1222,7 @@ public sealed class DecisionTools(DecisionService service)
     [McpServerTool(Name = "decision_decide", ReadOnly = true, Destructive = false, Idempotent = false, UseStructuredContent = true)]
     [Description("Evaluate text/JSON evidence against named predicate, choice, or score questions. Returns probabilities, choices, scores, refusals, and usage. Uses the provider configured when this MCP server starts.")]
     public async Task<DecisionResult> Decide(
-        [Description("Shared state and a dictionary of named questions. predicate: instructions; choice: instructions and choices {label: description}; score: instructions and levels [lowest,...,highest]. Optional images work with the decisions protocol only.")] DecisionRequest request,
+        [Description("Shared state and named predicate/choice/score questions. Query decision_models for SDK limits. Images require the HTTP transport and decisions protocol.")] DecisionRequest request,
         [Description("Optional model ID (Copilot/OpenAI) or deployment name (Foundry). Omit to use the server's --default-model (or --model) setting. Copilot defaults to microsoft-decision-1 when none is configured.")] string? model = null,
         CancellationToken cancellationToken = default)
     {
@@ -844,7 +1231,7 @@ public sealed class DecisionTools(DecisionService service)
     }
 
     [McpServerTool(Name = "decision_models", ReadOnly = true, Destructive = false, Idempotent = true, UseStructuredContent = true)]
-    [Description("List decision models from the authenticated Copilot catalog, including hidden models and policy states. For Foundry/OpenAI, describe the configured deployment/model instead.")]
+    [Description("List Copilot decision models, the configured default, and effective SDK limits. HTTP discovery includes model policies. For Foundry/OpenAI, describe the configured deployment/model instead.")]
     public async Task<ModelCatalog> Models(CancellationToken cancellationToken = default)
     {
         try { return await service.ModelsAsync(cancellationToken); }
@@ -888,7 +1275,7 @@ public static class DecisionCli
             var options = Configuration.Load(cli);
             if (cli.Command == "login") return await LoginAsync(options, cancellation.Token);
             using var http = HttpTransport.CreateClient();
-            var service = new DecisionService(options, http);
+            await using var service = new DecisionService(options, http);
             switch (cli.Command)
             {
                 case "models":
@@ -982,6 +1369,8 @@ public static class DecisionCli
 
         Provider options (also usable with mcp):
           --provider copilot|foundry|openai       Default: copilot
+          --transport auto|sdk|http               Default: SDK for Copilot, HTTP otherwise
+          --copilot-cli-path PATH                 Optional compatible SDK runtime executable
           --model ID                             Optional model / MCP default; Foundry: deployment name
           --default-model ID                     Alias for --model; sets the MCP startup default
           --endpoint HTTPS_RESOURCE_ROOT         No API path
@@ -992,7 +1381,7 @@ public static class DecisionCli
           --account GITHUB_LOGIN                 Select a saved github.com login
           --copilot-config PATH                  Default: ~/.copilot/config.json
           --api-key-env NAME                     Override the API key variable name
-          --timeout SECONDS                      Default: 60
+          --timeout SECONDS                      Total budget: 60 by default; SDK RPC maximum: 30s
           --config FILE --profile NAME           Read named configuration
 
         Decision options:
@@ -1001,7 +1390,7 @@ public static class DecisionCli
           --choice label=description             Repeat to ask a choice question
           --level DESCRIPTION                    Repeat, lowest first, for a score
           --name NAME                            Shorthand question name (default: decision)
-          --raw                                  Return the original provider JSON
+          --raw                                  HTTP: provider JSON; SDK: normalized RPC JSON
 
         Examples:
           dotnet run --file Decision.cs -- models
@@ -1009,6 +1398,7 @@ public static class DecisionCli
           dotnet run --file Decision.cs -- decide --model gpt-6-luna-decisions --input examples/ticket.json
           dotnet run --file Decision.cs -- mcp --auth copilot-cli
           dotnet run --file Decision.cs -- mcp --default-model gpt-6-luna-decisions
+          dotnet run --file Decision.cs -- decide --transport http --input examples/ticket.json
 
         MCP tool calls may omit model: call override > configured default > microsoft-decision-1 (Copilot).
         Configuration: CLI > DECISION_* environment > selected profile > defaults.
@@ -1028,7 +1418,7 @@ public sealed class CliArguments
     {
         CliArguments result = new();
         HashSet<string> flags = [with(StringComparer.Ordinal), "help", "raw"];
-        HashSet<string> valued = [with(StringComparer.Ordinal), "provider", "model", "default-model", "endpoint", "protocol", "auth", "account", "copilot-config", "api-key-env",
+        HashSet<string> valued = [with(StringComparer.Ordinal), "provider", "transport", "copilot-cli-path", "model", "default-model", "endpoint", "protocol", "auth", "account", "copilot-config", "api-key-env",
             "timeout", "config", "profile", "input", "text", "question", "choice", "level", "name"];
         bool commandSeen = false;
         for (int i = 0; i < args.Length; i++)
@@ -1085,6 +1475,7 @@ public static class Configuration
         foreach (var (option, property, environment) in new (string, string, string)[]
         {
             ("provider", "provider", "DECISION_PROVIDER"), ("model", "model", "DECISION_MODEL"),
+            ("transport", "transport", "DECISION_TRANSPORT"), ("copilot-cli-path", "copilotCliPath", "DECISION_COPILOT_CLI_PATH"),
             ("endpoint", "endpoint", "DECISION_ENDPOINT"), ("protocol", "protocol", "DECISION_PROTOCOL"),
             ("auth", "auth", "DECISION_AUTH"), ("account", "account", "DECISION_ACCOUNT"),
             ("copilot-config", "copilotConfig", "DECISION_COPILOT_CONFIG"), ("api-key-env", "apiKeyEnv", "DECISION_API_KEY_ENV")
@@ -1101,7 +1492,7 @@ public static class Configuration
             merged["timeoutSeconds"] = seconds;
         }
         var options = merged.Deserialize<ProviderOptions>(JsonData.Options) ?? new();
-        options = options with { Provider = options.Provider.ToLowerInvariant(), Protocol = options.Protocol.ToLowerInvariant(), Auth = options.Auth.ToLowerInvariant() };
+        options = options with { Provider = options.Provider.ToLowerInvariant(), Protocol = options.Protocol.ToLowerInvariant(), Auth = options.Auth.ToLowerInvariant(), Transport = options.Transport.ToLowerInvariant() };
         options.Validate();
         return options;
     }

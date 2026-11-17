@@ -2,11 +2,11 @@
 
 **Verified 2026-11-17**, after reviewing [the supplied gist](https://gist.github.com/Arithmomaniac/dbefa44862fdef934558565bbefcc6fb).
 
-## Recommendation
+## Implemented integration
 
-**Prefer an SDK-backed Copilot provider for the long-running MCP server**, provided the SDK's request limits fit the workload. It delegates authentication and the two decision protocols to the maintained Copilot runtime. Keep direct HTTP available for workloads needing capabilities outside that SDK contract, and for the existing Foundry/OpenAI providers.
+**The SDK-backed provider is now the default for Copilot**, including CLI and MCP use. It delegates saved-login authentication and both decision protocols to the maintained Copilot runtime. Select `--transport http` explicitly for the direct HTTP implementation. Foundry and OpenAI use their HTTP providers.
 
-The initial research missed this experimental API because it is exposed through generated RPC types rather than the main .NET README's chat examples. Both models really can be called with the published .NET SDK. The application in `Decision.cs` currently uses HTTP; the SDK proof of concept is a separate file-based example.
+The initial research missed this experimental API because it is exposed through generated RPC types rather than the main .NET README's chat examples. `CopilotSdkDecisionProvider` in `Decision.cs` now uses it, while the original proof of concept remains a separate file-based example.
 
 ## What was tested
 
@@ -43,7 +43,7 @@ COPILOT_CLI_ENABLED_FEATURE_FLAGS=DECISIONS_API
 #pragma warning disable GHCP001
 ```
 
-The NuGet package normally acquires a matching runtime; 1.0.34 pins CLI 1.0.112. The example opts out of that download and takes an explicit executable path, then checks the reported version/protocol. This reproduced the gist's compatible pair using the CLI already installed here. The gist reports that protocol-4 CLI 1.0.113-1 is incompatible with its protocol-3 SDK. An arbitrarily newer global CLI is therefore not a substitute for the package's matching runtime.
+The application's normal build acquires and bundles the matching runtime; SDK 1.0.34 pins CLI 1.0.112. `--copilot-cli-path` can select an existing compatible executable. The standalone probe opts out of downloading and takes an explicit executable path, then checks its version/protocol. The gist reports that protocol-4 CLI 1.0.113-1 is incompatible with the protocol-3 SDK.
 
 Run the example with an existing **1.0.112** installation:
 
@@ -55,7 +55,7 @@ This makes two live inference calls, prints the decision catalog and typed resul
 
 ## Tradeoffs that matter for this utility
 
-| Area | SDK 1.0.34 / runtime 1.0.112 | Current HTTP utility |
+| Area | SDK 1.0.34 / runtime 1.0.112 | Explicit HTTP transport |
 | --- | --- | --- |
 | Saved-login reuse | Runtime handles it | Custom OS-store readers and `gh` helper |
 | Protocol translation | One typed API for both model families | Two HTTP protocol adapters |
@@ -69,7 +69,7 @@ This makes two live inference calls, prints the decision catalog and typed resul
 | Deadline | **250-30,000 ms**, default 5,000 ms | Configurable end-to-end timeout, default 60 seconds |
 | Context types | Text; JSON object or array of objects | Text/JSON; Decisions image mapping is also implemented |
 | Raw response | Normalized SDK result | Original provider JSON with `--raw` |
-| Default model | **Luna** on the tested account | **Microsoft-Decision-1** |
+| Runtime/service default | **Luna** on the tested account; app explicitly supplies its Microsoft default | App supplies **Microsoft-Decision-1** |
 
 These SDK catalog limits were read from the live runtime, not inferred from the chat-model limits. Microsoft-Decision-1 additionally reported a 32,768-token budget for context plus a question. SDK choice values are restricted to 1-64 characters using letters, digits, and `._:/@-` according to its published type documentation. This SDK version has no image-context variant. Image inference through the existing HTTP adapter has not been live-tested here.
 
@@ -79,17 +79,25 @@ The one probe took about **2.8 seconds** for startup/status/authentication. The 
 
 The runtime normalizes probabilities and calculates `Confidence` as `(p_max - 1/n) / (1 - 1/n)`. The backend's own value is separately exposed as **`VendorConfidence`**. For one live Luna score, SDK confidence was about `0.385`, while vendor confidence was `0.39`.
 
-The current utility preserves the provider's confidence and probabilities. An SDK adapter must deliberately map these fields rather than silently changing the meaning of its existing `confidence` property. It should also preserve refusal results and distinguish `Model` from `UpstreamModel`. The original HTTP JSON is not exposed by this typed result, so `--raw` would need an explicitly documented SDK representation or the HTTP transport.
+The adapter preserves **`VendorConfidence` in `confidence`**, exposes SDK `Confidence` separately as `normalizedConfidence`, and includes `tied` for choice answers. Missing vendor confidence stays missing. Probabilities are the SDK-normalized values; HTTP retains the original provider values. Refusals remain refusals, and requested versus upstream model names remain distinct.
 
-### Suggested integration
+`--raw` returns the serialized normalized SDK result for SDK calls, or the upstream JSON for HTTP calls. Normal results include `transport` and `rawFormat` to make this distinction explicit. SDK usage is mapped to the common snake-case token fields without inventing unreported totals.
 
-1. Implement `CopilotSdkDecisionProvider : IDecisionProvider`, sharing one long-lived `CopilotClient` within the MCP server.
-2. Discover models through `Rpc.Models.ListAsync().DecisionModels`; use the effective runtime limits.
-3. Pass the utility's resolved model explicitly to `AskAsync`. Otherwise the runtime currently chooses Luna, conflicting with the requested Microsoft default.
-4. Map the existing predicate/choice/score request types and typed SDK answers; validate SDK-specific limits before calling.
-5. Keep the existing provider interface and CLI/MCP result shape, with explicit handling of the SDK deadline, confidence, and raw-response differences.
+### Lifecycle and configuration
+
+1. `CopilotSdkDecisionProvider : IDecisionProvider` starts its client lazily, serializes initialization, and shares that client across MCP tool calls. `DecisionService` disposes it at shutdown.
+2. Models come from `Rpc.Models.ListAsync().DecisionModels`; the returned catalog exposes effective limits and the runtime's default separately from the application's default. Discovery is cached for five minutes.
+3. Every `AskAsync` call explicitly receives the application's resolved model. The Microsoft default and per-call overrides therefore take precedence over the runtime's Luna default.
+4. The adapter checks question/option/level counts, choice-label syntax, serialized byte size, and JSON nesting before inference. The runtime enforces its token budget and remaining validation rules. Images require HTTP.
+5. `--timeout` remains an overall operation budget. Each SDK RPC uses at most `min(timeout, 30)` seconds, including the runtime's own queue/authentication/inference/parsing work.
+6. Saved-login and automatic authentication use the runtime directly. Explicit `--auth gh`, `--auth env`, or `--account` uses the existing targeted credential resolver and passes the credential privately to the client.
+7. Structured SDK failures become actionable CLI/MCP errors. The utility does not replay failed inference or switch transports automatically.
 
 This sessionless API is Copilot-account based. Foundry's deployment paths and Entra authentication remain served by the Foundry provider.
+
+### Account-list compatibility issue
+
+Live testing of `account.getAllUsers` with SDK 1.0.34/runtime 1.0.112 failed because the generated `AuthInfoGhCli` type requires a `token` property that the runtime redacts. An unrelated GitHub CLI entry can therefore prevent the whole account roster from deserializing. The application avoids this API: ordinary saved-login calls use `UseLoggedInUser`, and explicit `--account` calls reuse the existing login resolver. This preserves named-account selection without creating a chat session or changing the user's active CLI account.
 
 ## References
 
