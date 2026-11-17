@@ -1,0 +1,25 @@
+{
+  "data": [
+    {
+      "id": "microsoft-decision-1",
+      "name": "Microsoft-Decision-1",
+      "capabilities": { "type": "decisions" },
+      "model_picker_enabled": false,
+      "supported_endpoints": ["/v1/systemone"]
+    },
+    {
+      "id": "gpt-6-luna-decisions",
+      "name": "GPT-6 Luna Decisions",
+      "capabilities": { "type": "decisions" },
+      "model_picker_enabled": false,
+      "supported_endpoints": ["/v1/decisions"]
+    },
+    {
+      "id": "gpt-6-luna",
+      "name": "GPT-6 Luna",
+      "capabilities": { "type": "chat" },
+      "model_picker_enabled": true,
+      "supported_endpoints": ["/responses", "ws:/responses"]
+    }
+  ]
+}

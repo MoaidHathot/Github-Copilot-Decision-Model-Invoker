@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "decisions": {
+      "command": "dotnet",
+      "args": [
+        "run",
+        "--no-build",
+        "--file",
+        "W:/Playground/GHCP-Decision/Decision.cs",
+        "--",
+        "mcp",
+        "--auth",
+        "copilot-cli"
+      ]
+    }
+  }
+}

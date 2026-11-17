@@ -1,0 +1,6 @@
+artifacts/
+bin/
+obj/
+decision.config.json
+.env
+*.user

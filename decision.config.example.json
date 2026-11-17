@@ -1,0 +1,34 @@
+{
+  "defaultProfile": "copilot",
+  "profiles": {
+    "copilot": {
+      "provider": "copilot",
+      "model": "microsoft-decision-1",
+      "auth": "auto"
+    },
+    "luna": {
+      "provider": "copilot",
+      "model": "gpt-6-luna-decisions",
+      "auth": "auto"
+    },
+    "foundry-ms": {
+      "provider": "foundry",
+      "endpoint": "https://YOUR-RESOURCE.services.ai.azure.com",
+      "model": "YOUR-DECISION-DEPLOYMENT",
+      "protocol": "systemone",
+      "auth": "azure-cli"
+    },
+    "foundry-luna": {
+      "provider": "foundry",
+      "endpoint": "https://YOUR-RESOURCE.openai.azure.com",
+      "model": "YOUR-LUNA-DEPLOYMENT",
+      "protocol": "decisions",
+      "auth": "azure-cli"
+    },
+    "openai": {
+      "provider": "openai",
+      "model": "gpt-6-luna",
+      "auth": "api-key"
+    }
+  }
+}

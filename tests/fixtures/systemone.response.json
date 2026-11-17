@@ -1,0 +1,20 @@
+{
+  "model": "microsoft-decision-1.1",
+  "answers": {
+    "refund": { "type": "noul", "noul": 0.9995788684419998 },
+    "severity": {
+      "type": "score",
+      "score": 1.387337633097034,
+      "confidence": 0.2896320901262308,
+      "legend": { "0": "Low", "1": "Medium", "2": "High" },
+      "probabilities": { "0": 0.04312048674273954, "1": 0.5264213934174872, "2": 0.43045811983977333 }
+    },
+    "team": {
+      "type": "choice",
+      "choice": "billing",
+      "confidence": 0.9984835579242881,
+      "probabilities": { "billing": 0.998989038616192, "engineering": 0.00028452412701442564, "support": 0.0007264372567934651 }
+    }
+  },
+  "usage": { "input_tokens": 95, "output_tokens": 3 }
+}
