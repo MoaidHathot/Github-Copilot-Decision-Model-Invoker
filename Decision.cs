@@ -3,6 +3,22 @@
 #:property LangVersion=15.0
 #:property Nullable=enable
 #:property PublishAot=false
+#:property PackAsTool=true
+#:property PackageId=Copilot.Decision.CLI
+#:property ToolCommandName=gh-decide
+#:property Version=0.1.0-alpha.1
+#:property Authors=MoaidHathot
+#:property Description="Experimental CLI and MCP playground for GitHub Copilot decision models. For demos, testing, and experimentation; not production use."
+#:property PackageTags=copilot;decisions;cli;mcp;experimental
+#:property PackageLicenseExpression=Unlicense
+#:property PackageReadmeFile=README.md
+#:property PackageProjectUrl=https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker
+#:property RepositoryUrl=https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker
+#:property RepositoryType=git
+#:property SelfContained=false
+#:property NoDefaultExcludes=true
+#:property ToolPackageRuntimeIdentifiers="$([MSBuild]::ValueOrDefault('$(GH_DECIDE_PACKAGE_RIDS)', '$(NETCoreSdkPortableRuntimeIdentifier)'))"
+#:property RuntimeIdentifiers=$(ToolPackageRuntimeIdentifiers)
 #:package ModelContextProtocol@1.4.1
 #:package Microsoft.Extensions.Hosting@11.0.0
 #:package Azure.Identity@1.21.0
@@ -14,6 +30,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Net;
 using System.Net.Http.Headers;
+using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
@@ -33,6 +50,14 @@ using CopilotRpc = GitHub.Copilot.Rpc;
 public static class Program
 {
     public static Task<int> Main(string[] args) => DecisionCli.RunAsync(args);
+}
+
+public static class AppInfo
+{
+    public const string CommandName = "gh-decide";
+    public static string Version { get; } = typeof(Program).Assembly
+        .GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion.Split('+')[0] ?? "unknown";
+    public static string UserAgent => $"{CommandName}/{Version}";
 }
 
 // The public contract is independent of the hosting provider and its wire protocol.
@@ -905,7 +930,7 @@ public static class HttpTransport
 
     public static void AddCopilotHeaders(HttpRequestMessage request)
     {
-        request.Headers.Add("Editor-Version", "ghcp-decision/0.1.0");
+        request.Headers.Add("Editor-Version", AppInfo.UserAgent);
         request.Headers.Add("Copilot-Integration-Id", "copilot-developer-cli");
         request.Headers.Add("X-Initiator", "user");
         request.Headers.Add("X-Request-Id", Guid.NewGuid().ToString());
@@ -914,7 +939,7 @@ public static class HttpTransport
     public static async Task<JsonElement> SendAsync(HttpClient client, HttpRequestMessage request, CancellationToken cancellationToken)
     {
         request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
-        request.Headers.UserAgent.ParseAdd("ghcp-decision/0.1.0");
+        request.Headers.UserAgent.ParseAdd(AppInfo.UserAgent);
         using var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         string body = await response.Content.ReadAsStringAsync(cancellationToken);
         if (!response.IsSuccessStatusCode)
@@ -1269,9 +1294,10 @@ public static class DecisionCli
         Console.CancelKeyPress += handler;
         try
         {
+            if (args is ["--version"] or ["-v"]) args = ["version"];
             var cli = CliArguments.Parse(args);
             if (cli.Command == "help" || cli.Has("help")) { Console.WriteLine(Help); return 0; }
-            if (cli.Command == "version") { Console.WriteLine("ghcp-decision 0.1.0 (.NET 11 / C# 15)"); return 0; }
+            if (cli.Command == "version") { Console.WriteLine($"{AppInfo.CommandName} {AppInfo.Version} (.NET 11 / C# 15)"); return 0; }
             var options = Configuration.Load(cli);
             if (cli.Command == "login") return await LoginAsync(options, cancellation.Token);
             using var http = HttpTransport.CreateClient();
@@ -1292,7 +1318,7 @@ public static class DecisionCli
                     builder.Logging.AddConsole(o => o.LogToStandardErrorThreshold = LogLevel.Trace);
                     builder.Logging.SetMinimumLevel(LogLevel.Warning);
                     builder.Services.AddSingleton(service);
-                    builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = "ghcp-decision", Version = "0.1.0" })
+                    builder.Services.AddMcpServer(o => o.ServerInfo = new() { Name = AppInfo.CommandName, Version = AppInfo.Version })
                         .WithStdioServerTransport().WithTools<DecisionTools>(serializerOptions: JsonData.Options);
                     using (var host = builder.Build()) await host.RunAsync(cancellation.Token);
                     return 0;
@@ -1356,8 +1382,9 @@ public static class DecisionCli
     }
 
     private const string Help = """
-        ghcp-decision - decision models over GitHub Copilot, Foundry, or OpenAI
+        gh-decide - experimental decision-model CLI and MCP server
 
+        gh-decide <command> [options]
         dotnet run --file Decision.cs -- <command> [options]
 
         Commands:
@@ -1365,7 +1392,7 @@ public static class DecisionCli
           models   Discover Copilot decision models / describe a configured model.
           mcp      Run an MCP stdio server (stdout is reserved for MCP).
           login    Reuse browser login through copilot (default) or gh.
-          version  Print the utility version.
+          version  Print the utility version (also --version or -v).
 
         Provider options (also usable with mcp):
           --provider copilot|foundry|openai       Default: copilot

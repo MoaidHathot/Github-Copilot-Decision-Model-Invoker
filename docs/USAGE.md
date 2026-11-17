@@ -2,6 +2,8 @@
 
 A **single-file .NET 11 / C# 15 app** for decision models, usable as a CLI or an MCP stdio server. No application `.csproj` is needed; dependencies are declared in `Decision.cs`.
 
+The NuGet tool package is **`Copilot.Decision.CLI`**, with the command **`gh-decide`**. After installation, replace `dotnet run --file Decision.cs --` in the examples with `gh-decide`. See [packaging and local installation](PACKAGING.md).
+
 **Both Copilot models were called successfully on this machine using existing browser-login credentials.** No PAT was created or supplied. See [RESEARCH.md](../RESEARCH.md) for the dated findings and sources.
 
 | Provider | Model / deployment | Default API | Authentication |
@@ -241,7 +243,7 @@ Example MCP tool arguments using the server's default model:
 
 To override the default for one call, add `"model": "gpt-6-luna-decisions"` alongside `request`.
 
-`mcp.example.json` contains a `mcpServers` entry using this workspace's absolute path. Adapt the enclosing configuration format to your MCP client. Build once before using `--no-build`; this keeps build output out of the MCP stream. All server logging goes to stderr, and successful tools return structured content.
+`mcp.example.json` starts the installed `gh-decide` tool. `mcp.source.example.json` starts the file-based app using this workspace's absolute path; adjust that path for your checkout. Adapt the enclosing configuration format to your MCP client. Build once before using `--no-build`; this keeps build output out of the MCP stream. All server logging goes to stderr, and successful tools return structured content.
 
 The MCP server lazily starts **one SDK client**, reuses it across tool calls, and disposes it when the server stops. The resolved application model is always passed explicitly, so the runtime's current Luna default cannot replace the requested Microsoft default.
 

@@ -1,13 +1,8 @@
 {
   "mcpServers": {
     "decisions": {
-      "command": "dotnet",
+      "command": "gh-decide",
       "args": [
-        "run",
-        "--no-build",
-        "--file",
-        "P:/Github/Github-Copilot-Decision-Model-Invoker/Decision.cs",
-        "--",
         "mcp",
         "--transport",
         "sdk",

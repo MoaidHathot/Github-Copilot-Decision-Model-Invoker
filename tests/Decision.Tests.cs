@@ -2,6 +2,7 @@
 #:include ../Decision.cs
 #:property StartupObject=DecisionTests
 #:property CopilotSkipCliDownload=true
+#:property IsPackable=false
 #:include Decision.Sdk.Tests.cs
 
 using System.Diagnostics;

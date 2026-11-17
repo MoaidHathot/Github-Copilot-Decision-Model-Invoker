@@ -1,6 +1,6 @@
-# GitHub Copilot Decision Model Invoker
+# Copilot.Decision.CLI
 
-A single-file .NET CLI and MCP server for trying decision models with your GitHub Copilot account. **For demos, testing, and experimentation; not production use.**
+**`gh-decide`** is a .NET CLI and MCP server for trying decision models with your GitHub Copilot account. **For demos, testing, and experimentation; not production use.**
 
 ## Prerequisites
 
@@ -10,7 +10,7 @@ A single-file .NET CLI and MCP server for trying decision models with your GitHu
 
 The first build downloads the matching Copilot runtime. No PAT is needed for saved-login authentication.
 
-## Run
+## Run from source
 
 ```powershell
 # CLI: run the sample decision request.
@@ -21,6 +21,17 @@ dotnet build Decision.cs
 dotnet run --no-build --file Decision.cs -- mcp
 ```
 
-The default model is `microsoft-decision-1`. Add `--model gpt-6-luna-decisions` to select Luna, or `--transport http` to call the HTTP API directly.
+The default model is `microsoft-decision-1`. Add `--model gpt-6-luna-decisions` to select Luna, or `--transport http` for direct HTTP.
 
-[Full usage and configuration](docs/USAGE.md) · [MCP configuration example](mcp.example.json) · [Research](RESEARCH.md)
+## NuGet tool
+
+Package ID: **`Copilot.Decision.CLI`**. Installed command: **`gh-decide`**.
+
+```powershell
+# Once published to NuGet:
+dotnet tool install --global Copilot.Decision.CLI --prerelease
+gh-decide models
+gh-decide mcp
+```
+
+[Usage](https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker/blob/main/docs/USAGE.md) · [Packaging/local install](https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker/blob/main/docs/PACKAGING.md) · [MCP configuration](https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker/blob/main/mcp.example.json)

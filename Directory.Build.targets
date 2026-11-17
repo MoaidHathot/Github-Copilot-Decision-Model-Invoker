@@ -1,0 +1,7 @@
+<Project>
+  <!-- The application stays file-based. These items add documentation to its NuGet tool packages. -->
+  <ItemGroup Condition="'$(ToolCommandName)' == 'gh-decide' And '$(IsPackable)' != 'false'">
+    <None Include="$(MSBuildThisFileDirectory)README.md" Pack="true" PackagePath="/" />
+    <None Include="$(MSBuildThisFileDirectory)LICENSE" Pack="true" PackagePath="/" />
+  </ItemGroup>
+</Project>
