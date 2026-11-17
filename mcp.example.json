@@ -1,0 +1,19 @@
+{
+  "mcpServers": {
+    "decisions": {
+      "command": "dotnet",
+      "args": [
+        "run",
+        "--no-build",
+        "--file",
+        "P:/Github/Github-Copilot-Decision-Model-Invoker/Decision.cs",
+        "--",
+        "mcp",
+        "--transport",
+        "sdk",
+        "--auth",
+        "copilot-cli"
+      ]
+    }
+  }
+}

@@ -1,0 +1,35 @@
+{
+  "model": "gpt-6-luna",
+  "answers": [
+    { "type": "predicate", "name": "refund", "probability": 1.0 },
+    {
+      "type": "choice",
+      "name": "team",
+      "choice": "billing",
+      "probabilities": [
+        { "value": "billing", "probability": 1.0 },
+        { "value": "engineering", "probability": 0.0 },
+        { "value": "support", "probability": 0.0 }
+      ],
+      "confidence": 1.0
+    },
+    {
+      "type": "score",
+      "name": "severity",
+      "score": 0.8,
+      "probabilities": [
+        { "value": 0, "label": "Low", "probability": 0.21 },
+        { "value": 1, "label": "Medium", "probability": 0.78 },
+        { "value": 2, "label": "High", "probability": 0.01 }
+      ],
+      "confidence": 0.67
+    }
+  ],
+  "usage": {
+    "input_tokens": 394,
+    "input_tokens_details": { "cached_tokens": 0, "cache_write_tokens": 0 },
+    "output_tokens": 0,
+    "output_tokens_details": { "reasoning_tokens": 0 },
+    "total_tokens": 394
+  }
+}
