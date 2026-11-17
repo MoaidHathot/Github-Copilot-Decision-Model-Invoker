@@ -28,10 +28,13 @@ The default model is `microsoft-decision-1`. Add `--model gpt-6-luna-decisions` 
 Package ID: **`Copilot.Decision.CLI`**. Installed command: **`gh-decide`**.
 
 ```powershell
-# Once published to NuGet:
-dotnet tool install --global Copilot.Decision.CLI --prerelease
+# From a configured feed containing the package:
+dotnet tool install --global Copilot.Decision.CLI --version 0.1.0
 gh-decide models
 gh-decide mcp
+
+# Or run directly without installing:
+dnx Copilot.Decision.CLI -- -h
 ```
 
 [Usage](https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker/blob/main/docs/USAGE.md) · [Packaging/local install](https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker/blob/main/docs/PACKAGING.md) · [MCP configuration](https://github.com/MoaidHathot/Github-Copilot-Decision-Model-Invoker/blob/main/mcp.example.json)

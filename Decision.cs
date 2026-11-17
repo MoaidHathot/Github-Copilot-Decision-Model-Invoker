@@ -6,7 +6,7 @@
 #:property PackAsTool=true
 #:property PackageId=Copilot.Decision.CLI
 #:property ToolCommandName=gh-decide
-#:property Version=0.1.0-alpha.1
+#:property Version=0.1.0
 #:property Authors=MoaidHathot
 #:property Description="Experimental CLI and MCP playground for GitHub Copilot decision models. For demos, testing, and experimentation; not production use."
 #:property PackageTags=copilot;decisions;cli;mcp;experimental
