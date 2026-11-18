@@ -56,7 +56,7 @@ var result = await client.Rpc.Decisions.AskAsync(
     timeoutMs: 30_000);
 
 // 3. Read the typed answers. Boolean questions return a probability of yes.
-Console.WriteLine($"Model: {result.Model}");
+Console.WriteLine($"Model: {result.UpstreamModel}");
 
 foreach (var answer in result.Answers)
 {
