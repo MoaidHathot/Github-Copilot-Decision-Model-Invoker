@@ -23,6 +23,14 @@ dotnet run --no-build --file Decision.cs -- mcp
 
 The default model is `microsoft-decision-1`. Add `--model gpt-6-luna-decisions` to select Luna, or `--transport http` for direct HTTP.
 
+## Minimal SDK sample
+
+For a demo-friendly introduction, see [sample/Decision.cs](sample/Decision.cs) and its [walkthrough](sample/README.md). It asks boolean, choice, and score questions directly through the GitHub Copilot SDK.
+
+```powershell
+dotnet run --file sample/Decision.cs
+```
+
 ## NuGet tool
 
 Package ID: **`Copilot.Decision.CLI`**. Installed command: **`gh-decide`**.
